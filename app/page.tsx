@@ -1,22 +1,10 @@
 'use client';
 
 import { useState } from 'react';
-import { supabase } from '../lib/supabaseClient';
+import { Deudor } from '../models/Deudor';
+import { DeudasService } from '../services/DeudasService';
+import { Deuda } from '../models/Deuda';
 
-interface Deuda {
-  id: string;
-  monto_original: number;
-  saldo_pendiente: number;
-  estado: string;
-}
-
-interface Deudor {
-  id: string;
-  nombre: string;
-  documento_id: string;
-  telefono: string;
-  deudas: Deuda[];
-}
 
 export default function Home() {
   const [tab, setTab] = useState<'buscar' | 'nuevo'>('buscar');
@@ -25,58 +13,48 @@ export default function Home() {
   const [busqueda, setBusqueda] = useState('');
   const [resultados, setResultados] = useState<Deudor[]>([]);
   const [cargandoBusqueda, setCargandoBusqueda] = useState(false);
+  const [deudaHistorial, setDeudaHistorial] = useState<Deuda | null>(null);
+  const [modalNuevaDeudaOpen, setModalNuevaDeudaOpen] = useState(false);
 
   // Nuevo registro
   const [nombre, setNombre] = useState('');
   const [documentoId, setDocumentoId] = useState('');
   const [telefono, setTelefono] = useState('');
   const [monto, setMonto] = useState('');
-  const [fechaVencimiento, setFechaVencimiento] = useState('');
+  const [periodo, setPeriodo] = useState('');
   const [guardando, setGuardando] = useState(false);
   const [mensaje, setMensaje] = useState<{ tipo: 'exito' | 'error'; texto: string } | null>(null);
 
+  
   // Registrar Pago / Abono
   const [deudaSeleccionada, setDeudaSeleccionada] = useState<{ id: string; saldo: number; deudorNombre: string } | null>(null);
   const [montoAbono, setMontoAbono] = useState('');
   const [guardandoAbono, setGuardandoAbono] = useState(false);
 
-  // Función para buscar deudores
+  // Ejecutar Búsqueda mediante la clase de servicio
   const ejecutarBusqueda = async (query: string) => {
     if (!query.trim()) return;
     setCargandoBusqueda(true);
-    const { data, error } = await supabase
-      .from('deudores')
-      .select(`
-        id,
-        nombre,
-        documento_id,
-        telefono,
-        deudas (
-          id,
-          monto_original,
-          saldo_pendiente,
-          estado
-        )
-      `)
-      .or(`nombre.ilike.%${query}%,documento_id.ilike.%${query}%`);
-
-    if (error) {
-      console.error('Error al buscar:', error);
-    } else {
-      setResultados(data || []);
+    try {
+      const deudores = await DeudasService.buscarDeudores(query);
+      setResultados(deudores);
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setCargandoBusqueda(false);
     }
-    setCargandoBusqueda(false);
   };
+
 
   const handleBuscar = (e: React.FormEvent) => {
     e.preventDefault();
     ejecutarBusqueda(busqueda);
   };
 
-  // Guardar nueva deuda
+  // Registrar nueva deuda mediante la clase de servicio
   const registrarDeuda = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!nombre || !monto || !fechaVencimiento) {
+    if (!nombre || !monto || !periodo) {
       setMensaje({ tipo: 'error', texto: 'Nombre, monto y fecha son obligatorios.' });
       return;
     }
@@ -85,50 +63,20 @@ export default function Home() {
     setMensaje(null);
 
     try {
-      let deudorId: string | null = null;
-
-      if (documentoId) {
-        const { data: existe } = await supabase
-          .from('deudores')
-          .select('id')
-          .eq('documento_id', documentoId)
-          .maybeSingle();
-
-        if (existe) {
-          deudorId = existe.id;
-        }
-      }
-
-      if (!deudorId) {
-        const { data: nuevoDeudor, error: errDeudor } = await supabase
-          .from('deudores')
-          .insert([{ nombre, documento_id: documentoId || null, telefono: telefono || null }])
-          .select()
-          .single();
-
-        if (errDeudor) throw errDeudor;
-        deudorId = nuevoDeudor.id;
-      }
-
-      const montoNum = parseFloat(monto);
-      const { error: errDeuda } = await supabase.from('deudas').insert([
-        {
-          deudor_id: deudorId,
-          monto_original: montoNum,
-          saldo_pendiente: montoNum,
-          fecha_vencimiento: fechaVencimiento,
-          estado: 'pendiente',
-        },
-      ]);
-
-      if (errDeuda) throw errDeuda;
+      await DeudasService.registrarDeuda({
+        nombre,
+        documentoId,
+        telefono,
+        monto: parseFloat(monto),
+        periodo,
+      });
 
       setMensaje({ tipo: 'exito', texto: '¡Deuda registrada correctamente!' });
       setNombre('');
       setDocumentoId('');
       setTelefono('');
       setMonto('');
-      setFechaVencimiento('');
+      setPeriodo('');
     } catch (err: any) {
       console.error(err);
       setMensaje({ tipo: 'error', texto: err.message || 'Error al guardar registro.' });
@@ -137,8 +85,8 @@ export default function Home() {
     }
   };
 
-  // Registrar Abono
-  const registrarAbono = async (e: React.FormEvent) => {
+  // Registrar Abono mediante la clase de servicio
+const registrarAbono = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!deudaSeleccionada || !montoAbono) return;
 
@@ -151,19 +99,18 @@ export default function Home() {
     setGuardandoAbono(true);
 
     try {
-      const { error } = await supabase.from('pagos').insert([
-        {
-          deuda_id: deudaSeleccionada.id,
-          monto: montoNum,
-        },
-      ]);
+      await DeudasService.registrarAbono(deudaSeleccionada.id, montoNum);
+      
+      // Si el modal de historial pertenece a la misma deuda, lo cerramos para evitar datos desactualizados
+      if (deudaHistorial && deudaHistorial.id === deudaSeleccionada.id) {
+        setDeudaHistorial(null);
+      }
 
-      if (error) throw error;
-
-      // Cerrar modal, limpiar estado y refrescar búsqueda
       setDeudaSeleccionada(null);
       setMontoAbono('');
-      ejecutarBusqueda(busqueda);
+      
+      // Refrescamos la lista de resultados para obtener las deudas y pagos actualizados desde la BD
+      await ejecutarBusqueda(busqueda);
     } catch (err: any) {
       console.error(err);
       alert('Error al registrar el abono: ' + err.message);
@@ -182,7 +129,7 @@ export default function Home() {
             tab === 'buscar' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'
           }`}
         >
-          🔍 Buscar Deuda
+          Buscar Deuda
         </button>
         <button
           onClick={() => { setTab('nuevo'); setMensaje(null); }}
@@ -190,7 +137,7 @@ export default function Home() {
             tab === 'nuevo' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'
           }`}
         >
-          ➕ Registrar Deuda
+          Registrar Deuda
         </button>
       </div>
 
@@ -200,7 +147,7 @@ export default function Home() {
           <form onSubmit={handleBuscar} className="mb-6 flex gap-2">
             <input
               type="text"
-              placeholder="Nombre o Documento / DNI..."
+              placeholder="Nombre o C.I"
               value={busqueda}
               onChange={(e) => setBusqueda(e.target.value)}
               className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-blue-500"
@@ -213,39 +160,45 @@ export default function Home() {
               {cargandoBusqueda ? '...' : 'Buscar'}
             </button>
           </form>
+          
 
           <div className="space-y-4">
             {resultados.length === 0 && !cargandoBusqueda && (
-              <p className="text-center text-gray-500">Ingresa un término para consultar.</p>
+              <p className="text-center text-gray-500">Ingrese Nombre o Numero de C.I</p>
             )}
 
             {resultados.map((deudor) => {
-              const deudasPendientes = deudor.deudas?.filter((d) => d.saldo_pendiente > 0) || [];
-              const totalPendiente = deudor.deudas?.reduce((acc, d) => acc + Number(d.saldo_pendiente), 0) || 0;
+              // Uso de métodos de la clase Deudor
+              const deudasPendientes = deudor.obtenerDeudasPendientes();
+              const totalPendiente = deudor.calcularTotalPendiente();
 
               return (
                 <div key={deudor.id} className="bg-gray-800 p-4 rounded-xl border border-gray-700 shadow-md space-y-3">
                   <div className="flex justify-between items-start">
                     <div>
                       <h2 className="text-lg font-bold text-white">{deudor.nombre}</h2>
-                      <p className="text-xs text-gray-400">Doc: {deudor.documento_id || 'N/A'}</p>
+                      <p className="text-xs text-gray-400">Doc: {deudor.documentoId}</p>
                       {deudor.telefono && <p className="text-xs text-gray-400">Tel: {deudor.telefono}</p>}
+                    <p className="text-xs text-red-400 font-semibold">
+                    Meses pendientes: {deudor.obtenerMesesPendientesTexto()}
+                      </p>
                     </div>
                     <span
                       className={`px-3 py-1 text-xs rounded-full font-bold ${
-                        totalPendiente > 0 ? 'bg-red-500/20 text-red-400' : 'bg-green-500/20 text-green-400'
+                        !deudor.estaAlDia() ? 'bg-red-500/20 text-red-400' : 'bg-green-500/20 text-green-400'
                       }`}
                     >
-                      {totalPendiente > 0 ? 'Tiene Deuda' : 'Al Día'}
+                      {!deudor.estaAlDia() ? 'Tiene Deuda' : 'Al Día'}
                     </span>
-                  </div>
+                    
+                  </div>                  
 
                   <div className="pt-2 border-t border-gray-700 flex justify-between items-center">
                     <span className="text-sm text-gray-400">Total Pendiente:</span>
                     <span className="text-xl font-bold text-red-400">${totalPendiente.toFixed(2)}</span>
                   </div>
 
-                  {/* Listado de deudas activas para abonar */}
+                  {/* Listado de deudas activas usando objetos de la clase Deuda */}
                   {deudasPendientes.length > 0 && (
                     <div className="pt-2 space-y-2">
                       <p className="text-xs font-semibold text-gray-400">Deudas Pendientes:</p>
@@ -253,20 +206,29 @@ export default function Home() {
                         <div key={d.id} className="bg-gray-900/60 p-2.5 rounded-lg flex justify-between items-center text-sm">
                           <div>
                             <span className="text-gray-300">Saldo: </span>
-                            <span className="font-bold text-white">${Number(d.saldo_pendiente).toFixed(2)}</span>
-                            <span className="text-xs text-gray-500 block">Original: ${Number(d.monto_original).toFixed(2)}</span>
+                            <span className="font-bold text-white">${d.saldoPendiente.toFixed(2)}</span>
+                            <span className="text-xs text-gray-500 block">Original: ${d.montoOriginal.toFixed(2)}</span>
                           </div>
                           <button
                             onClick={() =>
                               setDeudaSeleccionada({
                                 id: d.id,
-                                saldo: Number(d.saldo_pendiente),
+                                saldo: d.saldoPendiente,
                                 deudorNombre: deudor.nombre,
                               })
+
+                          
                             }
                             className="bg-green-600 hover:bg-green-700 text-white text-xs font-bold px-3 py-2 rounded-lg transition-colors"
                           >
-                            💵 Registrar Abono
+                            Registrar Abono
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setDeudaHistorial(d)} // <-- Guarda la deuda activa en el estado
+                            className="bg-gray-700 hover:bg-gray-600 text-gray-200 text-xs font-semibold px-3 py-2 rounded-lg transition-colors"
+                          >
+                            Historial ({d.pagos.length})
                           </button>
                         </div>
                       ))}
@@ -277,6 +239,8 @@ export default function Home() {
             })}
           </div>
         </div>
+
+        
       )}
 
       {/* VISTA 2: NUEVO REGISTRO */}
@@ -343,18 +307,20 @@ export default function Home() {
                 className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:outline-none focus:border-blue-500"
               />
             </div>
+  <div>
+  <label className="block text-xs font-semibold text-gray-400 mb-1">
+    Mes a Cobrar *
+  </label>
+  <input
+    type="month"
+    required
+    value={periodo}
+    onChange={(e) => setPeriodo(e.target.value)}
+    className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:outline-none focus:border-blue-500 text-sm"
+  />
+</div>
 
-            <div>
-              <label className="block text-xs font-semibold text-gray-400 mb-1">Vencimiento *</label>
-              <input
-                type="date"
-                required
-                value={fechaVencimiento}
-                onChange={(e) => setFechaVencimiento(e.target.value)}
-                className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:outline-none focus:border-blue-500 text-sm"
-              />
             </div>
-          </div>
 
           <button
             type="submit"
@@ -366,7 +332,7 @@ export default function Home() {
         </form>
       )}
 
-      {/* MODAL / PANTALLA FLOTANTE PARA REGISTRAR ABONO */}
+      {/* MODAL PARA ABONAR */}
       {deudaSeleccionada && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
           <div className="bg-gray-800 border border-gray-700 rounded-2xl p-5 w-full max-w-sm space-y-4">
@@ -413,6 +379,53 @@ export default function Home() {
           </div>
         </div>
       )}
+
+{deudaHistorial && (
+  <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
+    <div className="bg-gray-800 border border-gray-700 rounded-2xl p-5 w-full max-w-sm space-y-4">
+      <div className="flex justify-between items-center">
+        <h3 className="text-lg font-bold text-white">
+          Historial - {deudaHistorial.obtenerNombreMes()}
+        </h3>
+        <button
+          onClick={() => setDeudaHistorial(null)} // <-- Limpia el estado para cerrar el modal
+          className="text-gray-400 hover:text-white font-bold text-lg"
+        >
+          ✕
+        </button>
+      </div>
+
+      <div className="text-xs space-y-1 text-gray-400 border-b border-gray-700 pb-3">
+        <p>Monto Original: <span className="text-white font-semibold">${deudaHistorial.montoOriginal.toFixed(2)}</span></p>
+        <p>Saldo Pendiente: <span className="text-red-400 font-semibold">${deudaHistorial.saldoPendiente.toFixed(2)}</span></p>
+      </div>
+
+      <div className="max-h-60 overflow-y-auto space-y-2 pr-1">
+        {deudaHistorial.pagos.length === 0 ? (
+          <p className="text-xs text-gray-500 text-center py-4">No hay abonos registrados para esta deuda.</p>
+        ) : (
+          deudaHistorial.pagos.map((pago) => (
+            <div key={pago.id} className="bg-gray-900/80 p-3 rounded-lg flex justify-between items-center text-xs">
+              <div>
+                <p className="text-white font-bold">+ ${pago.monto.toFixed(2)}</p>
+                <p className="text-gray-500 text-[10px]">{pago.obtenerFechaFormateada()}</p>
+              </div>
+              <span className="text-green-400 font-semibold bg-green-500/10 px-2 py-1 rounded">Abono</span>
+            </div>
+          ))
+        )}
+      </div>
+
+      <button
+        onClick={() => setDeudaHistorial(null)} // <-- Limpia el estado para cerrar el modal
+        className="w-full bg-gray-700 hover:bg-gray-600 p-2.5 rounded-xl font-semibold text-sm transition-colors"
+      >
+        Cerrar
+      </button>
+    </div>
+  </div>
+)}
+
     </main>
   );
 }
